@@ -122,7 +122,15 @@ def main(argv: list[str] | None = None) -> int:
         passed = sum(1 for result in results if result["passed"])
         print("-" * 100)
         print(f"{passed}/{len(results)} checks passed | mode={results[0]['mode']}")
-        print("Tip: install requirements.txt and configure an LLM key for natural-language answers.")
+        if results[0]["mode"] == "llm:ollama":
+            print("Running fully locally through Ollama; no API key or API cost.")
+        elif str(results[0]["mode"]).startswith("llm:"):
+            print(f"Generated through {results[0]['mode']}.")
+        else:
+            print(
+                "Tip: install requirements.txt and configure an LLM provider "
+                "(or Ollama) for natural-language answers."
+            )
 
     return 0 if all(result["passed"] for result in results) else 1
 

@@ -173,11 +173,22 @@ LLM_MODEL=gpt-4o-mini
 ```
 
 ```dotenv
-# Local Ollama (no cloud key)
+# Local Ollama (no cloud key, no API cost)
 LLM_PROVIDER=ollama
-LLM_MODEL=llama3.2
+LLM_MODEL=llama3.2:3b
 LLM_BASE_URL=http://localhost:11434/v1
 ```
+
+Start Ollama and pull the model once:
+
+```powershell
+ollama serve
+ollama pull llama3.2:3b
+```
+
+Use `llama3.2:1b` instead if the machine has limited RAM or you want faster CPU
+answers. The model runs entirely on your machine; no document text leaves the
+host.
 
 With no key, `LLM_PROVIDER=auto` resolves to `offline` and the service uses the
 cited extractive fallback. This is useful for a smoke test, but it is not a
@@ -385,13 +396,17 @@ Run the evaluation:
 python scripts/evaluate.py
 ```
 
-Expected with the sample corpus and fallback:
+Expected with the sample corpus:
 
 ```text
 yes   yes        yes   yes   How many PTO days do employees get?
 ...
-8/8 checks passed | mode=offline-extractive
+8/8 checks passed | mode=llm:ollama
+Running fully locally through Ollama; no API key or API cost.
 ```
+
+With `LLM_PROVIDER=offline`, the same harness reports
+`mode=offline-extractive` instead.
 
 ---
 
