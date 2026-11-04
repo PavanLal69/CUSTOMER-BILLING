@@ -1,18 +1,22 @@
-# Northstar Labs — RAG Internal Knowledge Assistant
+# Northstar Labs — RAG Knowledge Assistant & CX Workspace
 
-A complete, local-first Retrieval-Augmented Generation (RAG) service that answers
-employee questions from a small internal knowledge base and returns **cited
-answers plus the retrieved source text**.
+A complete, local-first Retrieval-Augmented Generation (RAG) service and a
+Customer Feedback & Ticketing frontend. It answers employee questions from a
+small internal knowledge base, returns **cited answers plus the retrieved source
+text**, and gives support teams a working inbox for tickets, CSAT follow-ups,
+and drafting cited replies.
 
 The sample corpus is a fictional company ("Northstar Labs") and includes the
 customer-support and ticketing playbook: P1–P4 response targets, escalation,
 refunds, and the CSAT closed-loop process. Questions about customer feedback,
 ticketing, HR policy, security, expenses, and the Orbit product are all supported.
 
-> **Status:** working end-to-end. The API runs with a deterministic offline
-> fallback (hash embeddings + SQLite + extractive answers) even without an API key
-> or model download. Install the recommended backends and add a key for semantic
-> retrieval and natural-language answers.
+> **Status:** working end-to-end, fully local. Ollama + `llama3.2:3b` generate
+> answers on this machine with no API key and no per-token cost. The API still
+> runs with a deterministic offline fallback (hash embeddings + SQLite +
+> extractive answers) when no model is available.
+
+![Northstar Orbit CX workspace showing the ticket inbox, conversation, CSAT follow-up, and a cited answer from the local knowledge assistant.](docs/frontend-preview.png)
 
 ---
 
@@ -27,8 +31,9 @@ ticketing, HR policy, security, expenses, and the Orbit product are all supporte
 | Grounded generation | Numbered context, strict system prompt, temperature 0, citation validation, refusal when context is insufficient |
 | Offline mode | Extractive answer built only from query-overlapping sentences, always cited |
 | API | FastAPI, Pydantic schemas, `/docs`, health/readiness, re-index endpoint, source listing |
+| Frontend | React + Vite Customer Feedback & Ticketing workspace, served by FastAPI at `/app/`; queue, ticket detail, CSAT closed loop, new-ticket flow, and a live cited assistant |
 | Observability | Per-request latency, retrieval scores, generation mode, warnings |
-| Testing | 20 tests covering chunking, persistence, retrieval, citation parsing, prompt construction, and API behavior |
+| Testing | 20 Python tests plus Playwright interaction checks for search, filters, feedback, resolution, ticket creation, and cited answers |
 
 ---
 
@@ -50,6 +55,9 @@ flowchart LR
     U --> W[Offline extractive fallback]
     V --> X[Answer + citations + sources]
     W --> X
+
+    X --> UI[frontend/<br/>Feedback & Ticketing workspace]
+    Q -. same request .-> UI
 ```
 
 ### Request flow
@@ -77,6 +85,20 @@ rag-qa-project/
 │       ├── expense-and-travel-policy.md
 │       ├── information-security-policy.md
 │       └── orbit-product-faq.md
+├── docs/
+│   └── frontend-preview.png       # UI screenshot used in this README
+├── frontend/
+│   ├── src/
+│   │   ├── components/            # sidebar, queue, workspace, assistant, dialog
+│   │   ├── kit/                   # selected Stageshow parts + MIT notice
+│   │   ├── App.tsx                # workspace state and interactions
+│   │   ├── api.ts                 # /query and /health client
+│   │   ├── data.ts                # realistic sample ticket corpus
+│   │   └── styles.css             # product UI, responsive rules
+│   ├── index.html
+│   ├── package.json
+│   ├── package-lock.json
+│   └── vite.config.ts
 ├── scripts/
 │   └── evaluate.py              # 8-question retrieval/answer smoke evaluation
 ├── src/
@@ -85,7 +107,7 @@ rag-qa-project/
 │   ├── embeddings.py            # Sentence Transformers + hashing fallback
 │   ├── generate.py              # prompt, LLM call, citations, offline extractor
 │   ├── ingest.py                # parsing, chunking, embedding, persistence
-│   ├── main.py                  # FastAPI app + service layer
+│   ├── main.py                  # FastAPI app + service layer + /app static mount
 │   ├── retrieve.py              # query embedding + hybrid reranking
 │   └── vector_store.py          # Chroma + SQLite persistence
 ├── tests/
@@ -105,8 +127,8 @@ rag-qa-project/
 └── requirements.txt
 ```
 
-Generated artifacts are ignored on purpose; `python -m src.ingest` recreates them
-deterministically from the documents.
+Generated artifacts are ignored on purpose; `python -m src.ingest` recreates the
+vector store, and `npm run build` recreates `frontend/dist`.
 
 ---
 
@@ -219,11 +241,58 @@ python -m uvicorn src.main:app --reload
 
 Open:
 
+- Customer Feedback & Ticketing UI: <http://127.0.0.1:8000/app/> (when
+  `frontend/dist` exists)
 - API docs: <http://127.0.0.1:8000/docs>
 - Health: <http://127.0.0.1:8000/health>
 - Root: <http://127.0.0.1:8000/>
 
-### 7. Ask a question
+### 7. Build and open the UI
+
+The production build is served by FastAPI at `/app/`:
+
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+python -m uvicorn src.main:app --reload
+```
+
+Open <http://127.0.0.1:8000/app/>.
+
+For frontend development with hot reload:
+
+```powershell
+cd frontend
+npm run dev
+```
+
+Open <http://127.0.0.1:5173/>. Vite proxies `/query`, `/health`, and `/sources`
+to the API on port 8000.
+
+The UI is a real, responsive workspace:
+
+- inbox with search, priority and feedback filters;
+- ticket conversation, internal notes, reply composer, resolve/reopen;
+- CSAT detractor view with the closed-loop checklist;
+- customer account view and recent tickets;
+- new-ticket dialog;
+- **Northstar AI** panel that calls the live `/query` endpoint, shows citations,
+  expands source chunks, and inserts a cleaned draft into the reply box.
+
+The visual language follows the **Stageshow** skill: one accent, quiet warm
+neutrals, a full-height product surface, real words on the focal content, and no
+generic AI sparkles or purple. The selected Stageshow kit parts (`Avatar`,
+`Badge`, tokens) live in `frontend/src/kit/` with their MIT license and notice.
+
+The skill was installed globally for this workspace with:
+
+```powershell
+npx skills add benjitaylor/skills --skill stageshow --global
+```
+
+### 8. Ask a question
 
 ```powershell
 $body = @{
@@ -287,6 +356,7 @@ Example (abridged):
 | `POST` | `/query` | Retrieve, generate, and return answer + citations + source texts |
 | `POST` | `/ingest` | Re-index from `DATA_DIR`; `{"reset": true}` rebuilds cleanly |
 | `GET` | `/docs` | Swagger UI |
+| `GET` | `/app/` | Customer Feedback & Ticketing UI (after `npm run build`) |
 
 ### `POST /query`
 
@@ -465,6 +535,22 @@ Answers use `[1]`, `[2]`, or `[1, 2]`, matching the numbered context. The API's
 `sources` array is one-based and includes a `cited` boolean, so a UI can highlight
 exactly which retrieved passages supported the answer.
 
+### Frontend design
+
+The UI applies the **Stageshow** skill to a real workspace rather than a marketing
+mockup:
+
+- a full-height product surface, not a floating window inside a card;
+- one warm neutral family and one persimmon accent; status color only for status;
+- the selected ticket and the assistant answer are the focal points, while the
+  queue and utility rail stay quieter;
+- real customer/ticket content replaces placeholder bars; no decorative
+  gradients, purple, or AI sparkles;
+- the assistant uses a book icon, not a magic wand, and every answer exposes its
+  source chunks;
+- the 390px layout drops the sidebar and stacks the queue above the ticket rather
+  than squeezing the desktop grid.
+
 ---
 
 ## Sample knowledge base
@@ -524,6 +610,16 @@ Tests cover:
 - offline extractive answers and refusals;
 - API health, query, validation, source listing, ingest, and the empty-store 409.
 
+Browser checks on the built UI cover:
+
+- inbox search and P1/Feedback filters;
+- selecting a ticket, opening the feedback view, and closing the loop;
+- resolving a ticket and reopening it;
+- creating a ticket through the dialog;
+- asking the local assistant, receiving a cited answer, and inserting it into the
+  reply composer;
+- desktop and 390px layouts with no console errors.
+
 ### Evaluation
 
 ```powershell
@@ -574,6 +670,9 @@ be compared meaningfully with documents embedded with model B.
 | `401`/`403` from the LLM | Check the provider key and base URL. |
 | `429` from the LLM | Back off or upgrade quota; the API returns an extractive fallback with a warning. |
 | Slow first request | The embedding model is loading/downloading on first use. |
+| `/app/` returns 404 | Build the UI: `cd frontend; npm install; npm run build`, then restart the API. |
+| UI says **API offline** | Start FastAPI on port 8000 and check `/health`. |
+| UI cannot answer | Confirm Ollama is running and `llama3.2:3b` is pulled, then reload the page. |
 | Tests cannot create temp folders | Use the included `pytest.ini`; if your sandbox blocks `%TEMP%`, run with a writable `--basetemp`. |
 
 ---
@@ -597,6 +696,8 @@ feat(generate): add grounded prompting, citations, and offline fallback
 feat(api): expose FastAPI query and ingestion endpoints
 test: cover ingestion, retrieval, generation, and API behavior
 docs: document setup, architecture, evaluation, and operations
+docs: document the local Ollama setup and evaluation mode
+feat(ui): add the Customer Feedback & Ticketing workspace
 ```
 
 To publish it:
@@ -626,6 +727,10 @@ This is a one-week internal assignment, not a production service:
   dedicated retrieval service.
 - The vector store is rebuilt from source documents rather than incrementally
   synchronized on file changes.
+- The frontend uses an in-memory sample ticket corpus: new tickets, replies,
+  resolutions, and close-loop actions reset on refresh. Wire those mutations to a
+  ticket API before using the workspace for real support.
+- The frontend is single-page and has no authentication or role-based views.
 - LLM usage, token counts, and provider errors are logged, but there is no
   metrics/tracing backend.
 
