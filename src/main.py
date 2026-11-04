@@ -11,11 +11,13 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from src import __version__
@@ -27,6 +29,8 @@ from src.retrieve import EmptyKnowledgeBaseError, Retriever, format_sources
 from src.vector_store import create_vector_store
 
 LOGGER = logging.getLogger(__name__)
+
+FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root() -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": "Northstar Labs RAG Knowledge Assistant",
             "version": __version__,
             "docs": "/docs",
@@ -269,6 +273,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "query": "POST /query",
             "ingest": "POST /ingest",
         }
+        if FRONTEND_DIST.exists():
+            payload["ui"] = "/app/"
+        return payload
 
     @app.get("/health", response_model=HealthResponse, tags=["operations"])
     def health(request: Request) -> HealthResponse:
@@ -294,6 +301,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             LOGGER.exception("Ingestion endpoint failed")
             raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
+
+    if FRONTEND_DIST.exists():
+        app.mount("/app", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
 
     return app
 

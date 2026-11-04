@@ -24,6 +24,15 @@ vector_store/*
 *.sqlite3-wal
 *.log
 
+# Frontend build and local review artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.chrome-profile/
+frontend/preview*.png
+frontend/inspect.mjs
+frontend/test-ui.mjs
+*.tsbuildinfo
+
 # Editors / OS
 .vscode/
 .idea/
