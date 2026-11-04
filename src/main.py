@@ -1,0 +1,312 @@
+"""FastAPI application exposing the RAG pipeline.
+
+Run locally:
+    python -m uvicorn src.main:app --reload
+    python -m src.main
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from src import __version__
+from src.config import Settings
+from src.embeddings import create_embedder
+from src.generate import GroundedGenerator
+from src.ingest import IngestReport, ingest_directory
+from src.retrieve import EmptyKnowledgeBaseError, Retriever, format_sources
+from src.vector_store import create_vector_store
+
+LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# API schemas
+# ---------------------------------------------------------------------------
+
+
+class QueryRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"question": "How many PTO days do employees get?", "top_k": 4}
+        }
+    )
+
+    question: str = Field(
+        ...,
+        min_length=3,
+        max_length=2000,
+        description="Natural-language question about the internal knowledge base.",
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description="Optional number of chunks to retrieve; defaults to TOP_K.",
+    )
+
+
+class SourceOut(BaseModel):
+    citation: int = Field(description="1-based citation number used in the answer.")
+    id: str
+    source: str
+    title: str
+    section: str
+    chunk_index: int
+    score: float
+    vector_score: float
+    lexical_score: float
+    cited: bool
+    text: str = Field(description="The retrieved chunk text, including its heading.")
+
+
+class CitationOut(BaseModel):
+    index: int
+    source: str
+    title: str
+    section: str
+
+
+class QueryResponse(BaseModel):
+    question: str
+    answer: str
+    citations: list[CitationOut]
+    sources: list[SourceOut]
+    model: str
+    mode: str
+    latency_ms: float
+    warnings: list[str] = Field(default_factory=list)
+
+
+class HealthResponse(BaseModel):
+    status: str
+    ready: bool
+    chunks: int
+    documents: int
+    embedding_backend: str
+    embedding_model: str
+    vector_backend: str
+    vector_store: str
+    llm_provider: str
+    llm_model: str
+    version: str
+
+
+class SourceListResponse(BaseModel):
+    count: int
+    sources: list[dict[str, Any]]
+
+
+class IngestRequest(BaseModel):
+    reset: bool = Field(
+        default=True,
+        description="Clear the collection before indexing. Keep true for a clean rebuild.",
+    )
+
+
+class IngestResponse(BaseModel):
+    documents: int
+    chunks: int
+    embedding_backend: str
+    embedding_model: str
+    vector_backend: str
+    store_location: str
+    elapsed_ms: float
+    reset: bool
+    warnings: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Service layer
+# ---------------------------------------------------------------------------
+
+
+class RAGService:
+    """Owns the embedder, vector store, retriever, and generator."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.embedder = create_embedder(settings)
+        self.store = create_vector_store(settings, self.embedder)
+        self.retriever = Retriever(settings, self.store, self.embedder)
+        self.generator = GroundedGenerator(settings)
+
+    def answer(self, question: str, *, top_k: int | None = None) -> QueryResponse:
+        started = time.perf_counter()
+        chunks = self.retriever.retrieve(question, top_k=top_k)
+        generated = self.generator.generate(question, chunks)
+
+        sources = format_sources(chunks)
+        cited_numbers = set(generated.citations)
+        for source in sources:
+            source["cited"] = source["citation"] in cited_numbers
+
+        by_index = {source["citation"]: source for source in sources}
+        citation_details = [
+            CitationOut(
+                index=number,
+                source=by_index[number]["source"],
+                title=by_index[number]["title"],
+                section=by_index[number]["section"],
+            )
+            for number in generated.citations
+            if number in by_index
+        ]
+
+        return QueryResponse(
+            question=question.strip(),
+            answer=generated.text,
+            citations=citation_details,
+            sources=sources,
+            model=generated.model,
+            mode=generated.mode,
+            latency_ms=round((time.perf_counter() - started) * 1000, 1),
+            warnings=generated.warnings,
+        )
+
+    def ingest(self, *, reset: bool = True) -> IngestResponse:
+        report: IngestReport = ingest_directory(
+            self.settings,
+            reset=reset,
+            embedder=self.embedder,
+            store=self.store,
+        )
+        return IngestResponse(**report.as_dict())
+
+    def health(self) -> HealthResponse:
+        try:
+            chunks = self.store.count()
+            sources = self.store.list_sources()
+        except Exception:  # A broken store should surface as "not ready", not a 500.
+            LOGGER.exception("Could not read vector-store health")
+            chunks = 0
+            sources = []
+        return HealthResponse(
+            status="ok",
+            ready=chunks > 0,
+            chunks=chunks,
+            documents=len(sources),
+            embedding_backend=self.embedder.name,
+            embedding_model=self.embedder.model_id,
+            vector_backend=self.store.backend_name,
+            vector_store=self.store.location,
+            llm_provider=self.generator.provider,
+            llm_model=self.generator.model,
+            version=__version__,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    resolved_settings = settings or Settings.from_env()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logging.basicConfig(
+            level=getattr(logging, resolved_settings.log_level, logging.INFO),
+            format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        )
+        LOGGER.info(
+            "Starting RAG API (embeddings=%s, vector=%s, llm=%s)",
+            resolved_settings.embedding_backend,
+            resolved_settings.vector_backend,
+            resolved_settings.resolved_llm_provider,
+        )
+        app.state.service = RAGService(resolved_settings)
+        try:
+            yield
+        finally:
+            app.state.service.store.close()
+
+    app = FastAPI(
+        title="Northstar Labs RAG Knowledge Assistant",
+        version=__version__,
+        description=(
+            "Retrieval-augmented question answering over the internal Northstar Labs "
+            "handbook, security policy, travel policy, support playbook, and product FAQ. "
+            "Answers include validated citations and the retrieved source texts."
+        ),
+        lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
+    @app.exception_handler(EmptyKnowledgeBaseError)
+    async def empty_store_handler(_: Request, exc: EmptyKnowledgeBaseError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "hint": "POST /ingest or run `python -m src.ingest` first.",
+            },
+        )
+
+    @app.get("/", include_in_schema=False)
+    def root() -> dict[str, Any]:
+        return {
+            "name": "Northstar Labs RAG Knowledge Assistant",
+            "version": __version__,
+            "docs": "/docs",
+            "health": "/health",
+            "query": "POST /query",
+            "ingest": "POST /ingest",
+        }
+
+    @app.get("/health", response_model=HealthResponse, tags=["operations"])
+    def health(request: Request) -> HealthResponse:
+        return request.app.state.service.health()
+
+    @app.get("/sources", response_model=SourceListResponse, tags=["knowledge base"])
+    def list_sources(request: Request) -> SourceListResponse:
+        sources = request.app.state.service.store.list_sources()
+        return SourceListResponse(count=len(sources), sources=sources)
+
+    @app.post("/query", response_model=QueryResponse, tags=["rag"])
+    def query(payload: QueryRequest, request: Request) -> QueryResponse:
+        if not payload.question.strip():
+            raise HTTPException(status_code=422, detail="question must not be blank")
+        return request.app.state.service.answer(payload.question, top_k=payload.top_k)
+
+    @app.post("/ingest", response_model=IngestResponse, tags=["knowledge base"])
+    def ingest(payload: IngestRequest, request: Request) -> IngestResponse:
+        try:
+            return request.app.state.service.ingest(reset=payload.reset)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            LOGGER.exception("Ingestion endpoint failed")
+            raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
+
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+        log_level="info",
+    )
