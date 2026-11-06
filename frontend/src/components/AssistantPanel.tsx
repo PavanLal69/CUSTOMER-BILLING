@@ -125,7 +125,7 @@ function AssistantPanelBase({ health, inputRef, onUseReply }: AssistantPanelProp
         <div className="cx-ai__answer" aria-live="polite">
           <div className="cx-ai__answer-head">
             <span>Answer</span>
-            <span>{answer.latency_ms.toFixed(0)} ms</span>
+            <span>Answered in {formatLatency(answer.latency_ms)}</span>
             <button type="button" className="cx-ai__reset" onClick={reset} aria-label="Clear answer">
               <RotateCcw size={12} strokeWidth={1.8} />
             </button>
@@ -220,6 +220,12 @@ function AssistantPanelBase({ health, inputRef, onUseReply }: AssistantPanelProp
 }
 
 export const AssistantPanel = memo(AssistantPanelBase)
+
+function formatLatency(latencyMs: number): string {
+  return latencyMs >= 1000
+    ? `${(latencyMs / 1000).toFixed(1)} s`
+    : `${Math.round(latencyMs)} ms`
+}
 
 function renderAnswer(text: string, onCitation: (index: string) => void) {
   const normalized = text.replace(/\*\*(.*?)\*\*/g, '$1')

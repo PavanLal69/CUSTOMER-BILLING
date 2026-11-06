@@ -6,6 +6,12 @@
       "sourceType": "github",
       "skillPath": "stageshow/SKILL.md",
       "computedHash": "730b32b96c3d290d37e0a7d2a62193e33a9314328313d6968740b6a817c8af61"
+    },
+    "unslop": {
+      "source": "heydamir/unslop",
+      "sourceType": "github",
+      "skillPath": "skills/unslop/SKILL.md",
+      "computedHash": "3375a859a14b4283b36e192e864b88971672ad390315995f97081a010dfd832c"
     }
   }
 }

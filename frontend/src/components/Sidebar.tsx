@@ -102,9 +102,6 @@ export function Sidebar({ view, onViewChange, openCount, detractorCount, channel
       <div className="cx-pulse" aria-label="CSAT for the last seven days">
         <div className="cx-pulse__head">
           <span>CSAT pulse</span>
-          <span className="cx-pulse__live">
-            <span className="cx-live-dot" aria-hidden /> Live
-          </span>
         </div>
         <div className="cx-pulse__body">
           <span className="cx-pulse__value">4.3</span>

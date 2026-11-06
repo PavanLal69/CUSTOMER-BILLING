@@ -593,6 +593,11 @@ exactly which retrieved passages supported the answer.
 
 ### Frontend design
 
+The interface polish follows the **Unslop** skill by Damir Sokolovsky, adapted
+for this support workspace. Skill source is included at `.agents/skills/unslop`
+under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); see its
+[original repository](https://github.com/heydamir/unslop).
+
 The UI applies the **Stageshow** skill to a real workspace rather than a marketing
 mockup:
 

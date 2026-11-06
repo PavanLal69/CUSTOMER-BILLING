@@ -1,4 +1,4 @@
-import { Inbox, MessageSquareText, SearchX } from 'lucide-react'
+import { Inbox, SearchX } from 'lucide-react'
 import { memo } from 'react'
 import { Avatar } from '../kit'
 import type { Ticket } from '../data'
@@ -93,9 +93,6 @@ export const TicketQueue = memo(function TicketQueue({
       <div className="cx-queue__foot">
         <span>
           <Inbox size={12} strokeWidth={1.8} aria-hidden /> Sorted by priority
-        </span>
-        <span>
-          <MessageSquareText size={12} strokeWidth={1.8} aria-hidden /> 92% quality
         </span>
       </div>
     </section>
