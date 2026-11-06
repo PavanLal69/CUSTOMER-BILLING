@@ -41,7 +41,26 @@ export interface RagHealth {
   version: string
 }
 
+export interface RagSourceRow {
+  source: string
+  title: string
+  chunks: number
+}
+
+export interface RagSourcesPage {
+  count: number
+  total: number
+  limit: number
+  offset: number
+  sources: RagSourceRow[]
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
+const HEALTH_TTL_MS = 8_000
+
+let healthCache: { at: number; value: RagHealth } | null = null
+let healthInFlight: Promise<RagHealth> | null = null
+const queryInFlight = new Map<string, Promise<RagAnswer>>()
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -52,20 +71,54 @@ async function parseError(response: Response): Promise<string> {
   }
 }
 
-export async function askKnowledge(question: string): Promise<RagAnswer> {
-  const response = await fetch(`${API_BASE}/query`, {
+/** Deduplicate identical in-flight questions; the UI still guards its button. */
+export function askKnowledge(question: string): Promise<RagAnswer> {
+  const clean = question.trim()
+  const key = clean.toLowerCase()
+  const existing = queryInFlight.get(key)
+  if (existing) return existing
+
+  const request = fetch(`${API_BASE}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, top_k: 4 }),
+    body: JSON.stringify({ question: clean, top_k: 4 }),
   })
-  if (!response.ok) throw new Error(await parseError(response))
-  return (await response.json()) as RagAnswer
+    .then(async (response) => {
+      if (!response.ok) throw new Error(await parseError(response))
+      return (await response.json()) as RagAnswer
+    })
+    .finally(() => queryInFlight.delete(key))
+
+  queryInFlight.set(key, request)
+  return request
 }
 
-export async function getHealth(): Promise<RagHealth> {
-  const response = await fetch(`${API_BASE}/health`)
+/** Health is polled; cache it briefly and share one in-flight request. */
+export function getHealth(force = false): Promise<RagHealth> {
+  if (!force && healthCache && Date.now() - healthCache.at < HEALTH_TTL_MS) {
+    return Promise.resolve(healthCache.value)
+  }
+  if (healthInFlight) return healthInFlight
+
+  healthInFlight = fetch(`${API_BASE}/health`)
+    .then(async (response) => {
+      if (!response.ok) throw new Error(await parseError(response))
+      const value = (await response.json()) as RagHealth
+      healthCache = { at: Date.now(), value }
+      return value
+    })
+    .finally(() => {
+      healthInFlight = null
+    })
+
+  return healthInFlight
+}
+
+export async function getSources(limit = 20, offset = 0): Promise<RagSourcesPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  const response = await fetch(`${API_BASE}/sources?${params}`)
   if (!response.ok) throw new Error(await parseError(response))
-  return (await response.json()) as RagHealth
+  return (await response.json()) as RagSourcesPage
 }
 
 export function stripCitations(answer: string): string {

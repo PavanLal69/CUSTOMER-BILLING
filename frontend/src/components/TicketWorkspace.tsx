@@ -14,7 +14,7 @@ import {
   Star,
   Tag,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { memo, useEffect, useRef, useState, type RefObject } from 'react'
 import { Avatar, Badge } from '../kit'
 import { AssistantPanel } from './AssistantPanel'
 import type { Ticket } from '../data'
@@ -61,7 +61,7 @@ function firstResponseProgress(ticket: Ticket): number {
   return Math.min(100, Math.round((minutes(ticket.firstResponse) / target) * 100))
 }
 
-export function TicketWorkspace({
+export const TicketWorkspace = memo(function TicketWorkspace({
   ticket,
   allTickets,
   health,
@@ -345,7 +345,7 @@ export function TicketWorkspace({
       </div>
     </section>
   )
-}
+})
 
 function FeedbackView({ ticket, onCloseLoop }: { ticket: Ticket; onCloseLoop: () => void }) {
   const closed = ticket.acknowledged

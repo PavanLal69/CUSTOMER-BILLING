@@ -24,6 +24,7 @@ _PROVIDER_DEFAULTS: dict[str, tuple[str, str | None]] = {
     "deepseek": ("deepseek-chat", "https://api.deepseek.com/v1"),
     "openai": ("gpt-4o-mini", "https://api.openai.com/v1"),
     "ollama": ("llama3.2", "http://localhost:11434/v1"),
+    "ollama-cloud": ("gemma4:31b", "https://ollama.com/v1"),
 }
 
 
@@ -93,6 +94,7 @@ class Settings:
     llm_model: str | None = None
     llm_base_url: str | None = None
     llm_api_key: str | None = field(default=None, repr=False)
+    ollama_api_key: str | None = field(default=None, repr=False)
     deepseek_api_key: str | None = field(default=None, repr=False)
     openai_api_key: str | None = field(default=None, repr=False)
     llm_temperature: float = 0.0
@@ -136,6 +138,7 @@ class Settings:
             llm_model=_env("LLM_MODEL"),
             llm_base_url=_env("LLM_BASE_URL"),
             llm_api_key=_env("LLM_API_KEY"),
+            ollama_api_key=_env("OLLAMA_API_KEY"),
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             openai_api_key=_env("OPENAI_API_KEY"),
             llm_temperature=_env_float("LLM_TEMPERATURE", 0.0),
@@ -179,6 +182,8 @@ class Settings:
         provider = (provider or self.resolved_llm_provider).lower()
         if self.llm_api_key:
             return self.llm_api_key
+        if provider == "ollama-cloud":
+            return self.ollama_api_key
         if provider == "deepseek":
             return self.deepseek_api_key
         if provider == "openai":

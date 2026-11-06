@@ -30,9 +30,9 @@ ticketing, HR policy, security, expenses, and the Orbit product are all supporte
 | Retrieval quality | Cosine vector search + explainable lexical reranking (coverage + saturated term frequency) |
 | Grounded generation | Numbered context, strict system prompt, temperature 0, citation validation, refusal when context is insufficient |
 | Offline mode | Extractive answer built only from query-overlapping sentences, always cited |
-| API | FastAPI, Pydantic schemas, `/docs`, health/readiness, re-index endpoint, source listing |
+| API | FastAPI, Pydantic schemas, `/docs`, health/readiness, re-index endpoint, paginated source listing, gzip compression, static cache headers |
 | Frontend | React + Vite Customer Feedback & Ticketing workspace, served by FastAPI at `/app/`; queue, ticket detail, CSAT closed loop, new-ticket flow, and a live cited assistant |
-| Observability | Per-request latency, retrieval scores, generation mode, warnings |
+| Observability | Per-request latency, `Server-Timing`, slow-request logs, web-vitals reporting, optional OpenTelemetry traces |
 | Testing | 20 Python tests plus Playwright interaction checks for search, filters, feedback, resolution, ticket creation, and cited answers |
 
 ---
@@ -371,6 +371,10 @@ Request body:
 
 `top_k` is optional and clamped to 1–10 at the API boundary.
 
+`GET /sources?limit=20&offset=0` returns a bounded page and includes `total`,
+`limit`, and `offset` for pagination. The default page size is 20 and the maximum
+is 100.
+
 The response includes:
 
 - `answer` — grounded answer with `[n]` citation markers;
@@ -400,14 +404,59 @@ put it behind authentication or disable it outside an admin network.
 All settings are environment variables; `.env` is loaded automatically. Paths are
 resolved relative to the repository root unless absolute.
 
+## Performance and observability
+
+- The UI debounces ticket search, virtualizes queues above 40 rows, memoizes
+  ticket rows, and lazy-loads the ticket workspace and new-ticket dialog.
+- The UI uses CSS skeletons while the workspace chunk loads and while the
+  assistant is answering. Ticket data is local sample data, so the queue itself
+  does not wait for a ticket API.
+- There are no remote photos or web fonts in the interface. Avatars use initials
+  by default; image avatars, if supplied, load lazily. Icons are bundled locally.
+- Vite emits fingerprinted static assets. FastAPI gives those immutable
+  one-year cache headers, keeps the app shell revalidatable, and compresses
+  responses larger than 500 bytes with gzip.
+- `Server-Timing` reports API handler duration. Requests taking at least 500 ms
+  are logged. The browser reports LCP, INP, CLS, and TTFB to
+  `POST /metrics/web-vitals`; collection is local application logging.
+- To enable FastAPI OpenTelemetry tracing, install
+  `requirements-observability.txt` and set `OTEL_ENABLED=true`. Set
+  `OTEL_EXPORTER_OTLP_ENDPOINT` for an OTLP collector; without an endpoint, spans
+  are written to the console. With tracing disabled, the app has no
+  OpenTelemetry runtime dependency.
+- The SQLite fallback uses a bounded pool of up to eight connections, WAL mode,
+  a busy timeout, and an index on `chunks.source`. Chroma manages its own local
+  persistent client.
+
+This repository runs as a local single-process demo with a sample ticket list.
+It has no remote ticket mutation API, CDN deployment, multi-instance hosting,
+external database, or slow queueable business workflow. Those deployment-level
+changes require the corresponding production services and data flows.
+
+## Always-on deployment
+
+The `Dockerfile` packages the frontend and FastAPI API into one web service. The
+`render.yaml` Blueprint is a starting point for an always-on Render deployment;
+it attaches a persistent disk for the SQLite vector store and prompts for the
+Ollama Cloud API key. Deploy it from a Git repository in Render, choose the
+configured paid web-service plan, and provide the key in Render's protected
+environment-variable form. The resulting Render URL replaces the laptop's
+ngrok URL. Render's free web services sleep when idle and don't support
+persistent disks, so they don't meet the always-on requirement.
+
+The web app and RAG API run on Render, while Ollama Cloud runs model inference.
+This keeps both the site and model requests independent of the laptop. The API
+key stays on the server; the frontend never receives it.
+
 ### LLM
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `LLM_PROVIDER` | `auto` | `auto`, `deepseek`, `openai`, `ollama`, `custom`, `offline` |
+| `LLM_PROVIDER` | `auto` | `auto`, `deepseek`, `openai`, `ollama`, `ollama-cloud`, `custom`, `offline` |
 | `DEEPSEEK_API_KEY` | — | Auto-selects DeepSeek when `LLM_PROVIDER=auto` |
 | `OPENAI_API_KEY` | — | Auto-selects OpenAI when DeepSeek key is absent |
 | `LLM_API_KEY` | — | Generic key for `custom` endpoints |
+| `OLLAMA_API_KEY` | — | API key for `LLM_PROVIDER=ollama-cloud` |
 | `LLM_BASE_URL` | provider default | OpenAI-compatible base URL, including `/v1` |
 | `LLM_MODEL` | provider default | `deepseek-chat`, `gpt-4o-mini`, or `llama3.2` |
 | `LLM_TEMPERATURE` | `0` | Keep low for factual RAG |
@@ -419,6 +468,13 @@ Provider base URLs:
 - DeepSeek: `https://api.deepseek.com/v1`
 - OpenAI: `https://api.openai.com/v1`
 - Ollama: `http://localhost:11434/v1`
+- Ollama Cloud: `https://ollama.com/v1`
+
+To run inference without keeping Ollama on your computer, create an Ollama API
+key and configure the backend with `LLM_PROVIDER=ollama-cloud`,
+`OLLAMA_API_KEY`, and a supported cloud model such as `gemma4:31b`. The key stays
+on the backend; never put it in frontend code. Ollama Cloud requests use the
+usage or credits on your Ollama account.
 
 Any OpenAI-compatible endpoint (vLLM, LiteLLM, OpenRouter, a company gateway)
 works with `LLM_PROVIDER=custom`, `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY`.

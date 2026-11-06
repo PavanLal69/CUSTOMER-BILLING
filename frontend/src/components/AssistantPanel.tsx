@@ -1,5 +1,5 @@
 import { ArrowUp, BookOpen, Check, ChevronDown, CornerDownLeft, RotateCcw } from 'lucide-react'
-import { useState, type RefObject } from 'react'
+import { memo, useRef, useState, type RefObject } from 'react'
 import { askKnowledge, stripCitations, type RagAnswer, type RagHealth } from '../api'
 import { assistantSuggestions } from '../data'
 
@@ -9,16 +9,22 @@ interface AssistantPanelProps {
   onUseReply: (text: string) => void
 }
 
-export function AssistantPanel({ health, inputRef, onUseReply }: AssistantPanelProps) {
+function AssistantPanelBase({ health, inputRef, onUseReply }: AssistantPanelProps) {
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState<RagAnswer | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openSource, setOpenSource] = useState<string | null>(null)
+  const inFlight = useRef(false)
+  const requestId = useRef(0)
 
   const ask = async (prompt = question) => {
     const clean = prompt.trim()
-    if (!clean || loading) return
+    if (!clean || inFlight.current) return
+
+    inFlight.current = true
+    const id = ++requestId.current
+
     setQuestion(clean)
     setLoading(true)
     setError(null)
@@ -26,15 +32,23 @@ export function AssistantPanel({ health, inputRef, onUseReply }: AssistantPanelP
     setOpenSource(null)
     try {
       const result = await askKnowledge(clean)
+      if (id !== requestId.current) return
       setAnswer(result)
     } catch (reason) {
+      if (id !== requestId.current) return
       setError(reason instanceof Error ? reason.message : 'The knowledge API is unavailable.')
     } finally {
-      setLoading(false)
+      if (id === requestId.current) {
+        inFlight.current = false
+        setLoading(false)
+      }
     }
   }
 
   const reset = () => {
+    requestId.current += 1
+    inFlight.current = false
+    setLoading(false)
     setQuestion('')
     setAnswer(null)
     setError(null)
@@ -81,12 +95,19 @@ export function AssistantPanel({ health, inputRef, onUseReply }: AssistantPanelP
       )}
 
       {loading && (
-        <div className="cx-ai__loading" role="status">
+        <div className="cx-ai__loading" role="status" aria-live="polite">
           <span className="cx-spinner" aria-hidden />
-          <span>
-            Searching {health?.chunks ?? 58} chunks
-            <small>Retrieval, then local generation</small>
-          </span>
+          <div className="cx-ai__loading-copy">
+            <span>
+              Searching {health?.chunks ?? 58} chunks
+              <small>Retrieval, then local generation</small>
+            </span>
+            <span className="cx-ai__loading-skeleton" aria-hidden>
+              <i style={{ width: '95%' }} />
+              <i style={{ width: '82%' }} />
+              <i style={{ width: '61%' }} />
+            </span>
+          </div>
         </div>
       )}
 
@@ -197,6 +218,8 @@ export function AssistantPanel({ health, inputRef, onUseReply }: AssistantPanelP
     </section>
   )
 }
+
+export const AssistantPanel = memo(AssistantPanelBase)
 
 function renderAnswer(text: string, onCitation: (index: string) => void) {
   const normalized = text.replace(/\*\*(.*?)\*\*/g, '$1')

@@ -1,6 +1,8 @@
 import { Inbox, MessageSquareText, SearchX } from 'lucide-react'
+import { memo } from 'react'
 import { Avatar } from '../kit'
 import type { Ticket } from '../data'
+import { useVirtualRows } from '../hooks/useVirtualRows'
 
 export type QueueFilter = 'open' | 'p1' | 'feedback' | 'all'
 
@@ -24,7 +26,7 @@ const FILTERS: { id: QueueFilter; label: string }[] = [
 
 const PRIORITY_ORDER: Record<Ticket['priority'], number> = { P1: 0, P2: 1, P3: 2, P4: 3 }
 
-export function TicketQueue({
+export const TicketQueue = memo(function TicketQueue({
   tickets,
   selectedId,
   filter,
@@ -37,6 +39,8 @@ export function TicketQueue({
   const sorted = [...tickets].sort(
     (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority],
   )
+  const virtual = useVirtualRows(sorted.length, 78, sorted.length > 40)
+  const visible = sorted.slice(virtual.start, virtual.end)
 
   return (
     <section className="cx-queue" aria-label="Ticket queue">
@@ -66,7 +70,7 @@ export function TicketQueue({
         </div>
       </div>
 
-      <div className="cx-queue__list">
+      <div className="cx-queue__list" ref={virtual.listRef} onScroll={virtual.onScroll}>
         {sorted.length === 0 && (
           <div className="cx-empty">
             <SearchX size={22} strokeWidth={1.6} aria-hidden />
@@ -74,14 +78,16 @@ export function TicketQueue({
             <span>{search ? `Nothing for “${search}”.` : 'Try another filter.'}</span>
           </div>
         )}
-        {sorted.map((ticket) => (
+        {virtual.padTop > 0 && <div aria-hidden style={{ height: virtual.padTop }} />}
+        {visible.map((ticket) => (
           <TicketRow
             key={ticket.id}
             ticket={ticket}
             selected={ticket.id === selectedId}
-            onClick={() => onSelect(ticket.id)}
+            onSelect={onSelect}
           />
         ))}
+        {virtual.padBottom > 0 && <div aria-hidden style={{ height: virtual.padBottom }} />}
       </div>
 
       <div className="cx-queue__foot">
@@ -94,9 +100,9 @@ export function TicketQueue({
       </div>
     </section>
   )
-}
+})
 
-function TicketRow({ ticket, selected, onClick }: { ticket: Ticket; selected: boolean; onClick: () => void }) {
+const TicketRow = memo(function TicketRow({ ticket, selected, onSelect }: { ticket: Ticket; selected: boolean; onSelect: (id: string) => void }) {
   const detractor = ticket.csat <= 2
   return (
     <button
@@ -104,7 +110,7 @@ function TicketRow({ ticket, selected, onClick }: { ticket: Ticket; selected: bo
       className="cx-ticket"
       data-selected={selected || undefined}
       data-unread={ticket.status === 'New' || undefined}
-      onClick={onClick}
+      onClick={() => onSelect(ticket.id)}
       aria-current={selected ? 'true' : undefined}
     >
       <Avatar name={ticket.customer} size={30} tone="person" />
@@ -128,4 +134,4 @@ function TicketRow({ ticket, selected, onClick }: { ticket: Ticket; selected: bo
       </span>
     </button>
   )
-}
+})

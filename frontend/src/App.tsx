@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getHealth, type RagHealth } from './api'
 import { currentUser, tickets as initialTickets, type Channel, type Priority, type Ticket } from './data'
+import { useDebouncedValue } from './hooks/useDebouncedValue'
 import { StageshowRoot } from './kit'
 import { Sidebar, type WorkspaceView } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
 import { TicketQueue, type QueueFilter } from './components/TicketQueue'
-import { TicketWorkspace } from './components/TicketWorkspace'
-import { NewTicketDialog } from './components/NewTicketDialog'
+import { WorkspaceSkeleton } from './components/Skeletons'
+
+const TicketWorkspace = lazy(() => import('./components/TicketWorkspace').then((module) => ({ default: module.TicketWorkspace })))
+const NewTicketDialog = lazy(() => import('./components/NewTicketDialog').then((module) => ({ default: module.NewTicketDialog })))
 
 const TARGET_BY_PRIORITY: Record<Priority, string> = {
   P1: '4h',
@@ -34,6 +37,7 @@ export default function App() {
   const [filter, setFilter] = useState<QueueFilter>('open')
   const [view, setView] = useState<WorkspaceView>('inbox')
   const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search, 180)
   const [health, setHealth] = useState<RagHealth | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [newTicketOpen, setNewTicketOpen] = useState(false)
@@ -114,7 +118,7 @@ export default function App() {
   )
 
   const filteredTickets = useMemo(() => {
-    const needle = search.trim().toLowerCase()
+    const needle = debouncedSearch.trim().toLowerCase()
     return ticketList.filter((ticket) => {
       const matchesFilter =
         filter === 'all'
@@ -131,7 +135,7 @@ export default function App() {
         .toLowerCase()
         .includes(needle)
     })
-  }, [ticketList, filter, search])
+  }, [ticketList, filter, debouncedSearch])
 
   const selected = ticketList.find((ticket) => ticket.id === selectedId) ?? filteredTickets[0] ?? ticketList[0]
 
@@ -141,7 +145,7 @@ export default function App() {
     }
   }, [filteredTickets, selectedId])
 
-  const changeView = (next: WorkspaceView) => {
+  const changeView = useCallback((next: WorkspaceView) => {
     setView(next)
     if (next === 'feedback') {
       const firstDetractor = ticketList.find((ticket) => ticket.csat <= 2)
@@ -152,33 +156,33 @@ export default function App() {
     } else {
       setFilter('all')
     }
-  }
+  }, [ticketList])
 
-  const changeFilter = (next: QueueFilter) => {
+  const changeFilter = useCallback((next: QueueFilter) => {
     setFilter(next)
     setView(next === 'feedback' ? 'feedback' : 'inbox')
-  }
+  }, [])
 
-  const updateTicket = (id: string, update: (ticket: Ticket) => Ticket) => {
+  const updateTicket = useCallback((id: string, update: (ticket: Ticket) => Ticket) => {
     setTicketList((current) => current.map((ticket) => (ticket.id === id ? update(ticket) : ticket)))
-  }
+  }, [])
 
-  const resolveTicket = (id: string) => {
+  const resolveTicket = useCallback((id: string) => {
     updateTicket(id, (ticket) => ({ ...ticket, status: 'Resolved', updated: 'now' }))
     setToast(`${id} resolved. The post-resolution survey will send automatically.`)
-  }
+  }, [updateTicket])
 
-  const reopenTicket = (id: string) => {
+  const reopenTicket = useCallback((id: string) => {
     updateTicket(id, (ticket) => ({ ...ticket, status: 'In progress', updated: 'now' }))
     setToast(`${id} reopened and assigned to ${currentUser.name}.`)
-  }
+  }, [updateTicket])
 
-  const closeLoop = (id: string) => {
+  const closeLoop = useCallback((id: string) => {
     updateTicket(id, (ticket) => ({ ...ticket, acknowledged: true }))
     setToast('Follow-up logged. The detractor loop is closed.')
-  }
+  }, [updateTicket])
 
-  const sendReply = (id: string, body: string) => {
+  const sendReply = useCallback((id: string, body: string) => {
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     updateTicket(id, (ticket) => ({
       ...ticket,
@@ -196,7 +200,7 @@ export default function App() {
       ],
     }))
     setToast('Reply sent to the customer.')
-  }
+  }, [updateTicket])
 
   const createTicket = (values: { customer: string; subject: string; priority: Priority; channel: Channel }) => {
     const nextNumber = Math.max(...ticketList.map((ticket) => Number(ticket.id.replace('T-', '')) || 0)) + 1
@@ -286,6 +290,7 @@ export default function App() {
             detractorCount={detractorCount}
             search={search}
           />
+          <Suspense fallback={<WorkspaceSkeleton />}>
           <TicketWorkspace
             ticket={selected}
             allTickets={ticketList}
@@ -296,6 +301,7 @@ export default function App() {
             onCloseLoop={closeLoop}
             onReply={sendReply}
           />
+          </Suspense>
         </main>
         <div className="cx-statusbar">
           <span>{filteredTickets.length} of {ticketList.length} tickets · {FILTER_LABEL[filter]}</span>
@@ -305,7 +311,7 @@ export default function App() {
         </div>
       </div>
 
-      <NewTicketDialog open={newTicketOpen} onClose={() => setNewTicketOpen(false)} onCreate={createTicket} />
+      {newTicketOpen && <Suspense fallback={null}><NewTicketDialog open onClose={() => setNewTicketOpen(false)} onCreate={createTicket} /></Suspense>}
       {toast && <div className="cx-toast" role="status">{toast}</div>}
     </StageshowRoot>
   )

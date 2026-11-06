@@ -12,7 +12,9 @@ import importlib.util
 import json
 import logging
 import re
+import queue
 import sqlite3
+import threading
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -93,7 +95,11 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
-    def list_sources(self) -> list[dict[str, Any]]:
+    def list_sources(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        ...
+
+    @abstractmethod
+    def source_count(self) -> int:
         ...
 
     def close(self) -> None:
@@ -136,6 +142,9 @@ class SQLiteVectorStore(VectorStore):
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._connections: queue.LifoQueue[sqlite3.Connection] = queue.LifoQueue(maxsize=8)
+        self._pool_slots = threading.BoundedSemaphore(8)
+        self._closed = False
         self._init_schema()
 
     @property
@@ -148,21 +157,41 @@ class SQLiteVectorStore(VectorStore):
 
     @contextmanager
     def _connection(self):
-        """Open, commit/rollback, and always close a short-lived connection."""
-        connection = sqlite3.connect(self.path, timeout=30)
+        """Borrow an exclusive connection from the bounded SQLite pool."""
+        self._pool_slots.acquire()
         try:
-            connection.execute("PRAGMA busy_timeout = 30000")
-            connection.execute("PRAGMA journal_mode = WAL")
+            connection = self._connections.get_nowait()
+        except queue.Empty:
+            try:
+                connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
+                connection.execute("PRAGMA busy_timeout = 30000")
+            except Exception:
+                self._pool_slots.release()
+                raise
+        try:
             yield connection
             connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
-            connection.close()
+            if self._closed:
+                connection.close()
+            else:
+                self._connections.put(connection)
+            self._pool_slots.release()
+
+    def close(self) -> None:
+        self._closed = True
+        while True:
+            try:
+                self._connections.get_nowait().close()
+            except queue.Empty:
+                break
 
     def _init_schema(self) -> None:
         with self._connection() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chunks (
@@ -180,7 +209,9 @@ class SQLiteVectorStore(VectorStore):
                 )
                 """
             )
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source)")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_source_title ON chunks(source, title)"
+            )
 
     def count(self) -> int:
         with self._connection() as connection:
@@ -256,7 +287,7 @@ class SQLiteVectorStore(VectorStore):
         with self._connection() as connection:
             connection.execute("DELETE FROM chunks")
 
-    def list_sources(self) -> list[dict[str, Any]]:
+    def list_sources(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -264,9 +295,18 @@ class SQLiteVectorStore(VectorStore):
                 FROM chunks
                 GROUP BY source, title
                 ORDER BY source
-                """
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
             ).fetchall()
         return [{"source": row[0], "title": row[1], "chunks": int(row[2])} for row in rows]
+
+    def source_count(self) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM (SELECT source, title FROM chunks GROUP BY source, title)"
+            ).fetchone()
+        return int(row[0]) if row else 0
 
 
 class ChromaVectorStore(VectorStore):
@@ -359,9 +399,9 @@ class ChromaVectorStore(VectorStore):
             LOGGER.debug("Chroma collection %s did not exist during reset", self.collection_name)
         self._collection = self._get_or_create_collection()
 
-    def list_sources(self) -> list[dict[str, Any]]:
+    def list_sources(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         try:
-            result = self._collection.get(include=["metadatas"])
+            result = self._collection.get(include=["metadatas"], limit=100_000)
         except Exception:  # pragma: no cover
             return []
         counts: dict[tuple[str, str], int] = {}
@@ -369,10 +409,14 @@ class ChromaVectorStore(VectorStore):
             metadata = metadata or {}
             key = (str(metadata.get("source", "unknown")), str(metadata.get("title", "")))
             counts[key] = counts.get(key, 0) + 1
-        return [
+        rows = [
             {"source": source, "title": title, "chunks": chunks}
             for (source, title), chunks in sorted(counts.items())
         ]
+        return rows[offset : offset + limit]
+
+    def source_count(self) -> int:
+        return len(self.list_sources(limit=100_000))
 
 
 def create_vector_store(settings, embedder) -> VectorStore:

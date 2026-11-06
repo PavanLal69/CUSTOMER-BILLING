@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,6 +31,7 @@ from src.retrieve import EmptyKnowledgeBaseError, Retriever, format_sources
 from src.vector_store import create_vector_store
 
 LOGGER = logging.getLogger(__name__)
+_otel_provider_configured = False
 
 FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
@@ -107,7 +110,18 @@ class HealthResponse(BaseModel):
 
 class SourceListResponse(BaseModel):
     count: int
+    total: int
+    limit: int
+    offset: int
     sources: list[dict[str, Any]]
+
+
+class WebVitalEvent(BaseModel):
+    name: str = Field(pattern=r"^(CLS|INP|LCP|TTFB)$")
+    value: float = Field(ge=0, le=600_000)
+    rating: str = Field(pattern=r"^(good|needs-improvement|poor)$")
+    id: str = Field(min_length=1, max_length=100)
+    navigationType: str = Field(max_length=40)
 
 
 class IngestRequest(BaseModel):
@@ -189,16 +203,16 @@ class RAGService:
     def health(self) -> HealthResponse:
         try:
             chunks = self.store.count()
-            sources = self.store.list_sources()
+            source_count = self.store.source_count()
         except Exception:  # A broken store should surface as "not ready", not a 500.
             LOGGER.exception("Could not read vector-store health")
             chunks = 0
-            sources = []
+            source_count = 0
         return HealthResponse(
             status="ok",
             ready=chunks > 0,
             chunks=chunks,
-            documents=len(sources),
+            documents=source_count,
             embedding_backend=self.embedder.name,
             embedding_model=self.embedder.model_id,
             vector_backend=self.store.backend_name,
@@ -215,6 +229,7 @@ class RAGService:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    global _otel_provider_configured
     resolved_settings = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -252,6 +267,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
+    app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=5)
+
+    @app.middleware("http")
+    async def performance_headers(request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+        if request.url.path.startswith("/app/"):
+            asset_name = Path(request.url.path).name
+            hashed_asset = bool(re.search(r"-[A-Za-z0-9_-]{8,}\.", asset_name))
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable" if hashed_asset else "no-cache"
+            )
+        if elapsed_ms >= 500:
+            LOGGER.info(
+                "slow_request method=%s path=%s status=%s duration_ms=%.1f",
+                request.method,
+                request.url.path,
+                response.status_code,
+                elapsed_ms,
+            )
+        return response
+
+    if os.getenv("OTEL_ENABLED", "false").lower() in {"1", "true", "yes"}:
+        try:
+            from opentelemetry import trace
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+            if not _otel_provider_configured:
+                traces_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                has_otlp_endpoint = traces_endpoint or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+                if traces_endpoint:
+                    exporter = OTLPSpanExporter(endpoint=traces_endpoint)
+                elif has_otlp_endpoint:
+                    exporter = OTLPSpanExporter()
+                else:
+                    exporter = ConsoleSpanExporter()
+                provider = TracerProvider(
+                    resource=Resource.create(
+                        {"service.name": os.getenv("OTEL_SERVICE_NAME", "northstar-rag-api")}
+                    )
+                )
+                provider.add_span_processor(BatchSpanProcessor(exporter))
+                trace.set_tracer_provider(provider)
+                _otel_provider_configured = True
+            FastAPIInstrumentor.instrument_app(app)
+        except ImportError:
+            LOGGER.warning(
+                "OTEL_ENABLED is set but OpenTelemetry instrumentation is not installed"
+            )
 
     @app.exception_handler(EmptyKnowledgeBaseError)
     async def empty_store_handler(_: Request, exc: EmptyKnowledgeBaseError) -> JSONResponse:
@@ -282,9 +352,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return request.app.state.service.health()
 
     @app.get("/sources", response_model=SourceListResponse, tags=["knowledge base"])
-    def list_sources(request: Request) -> SourceListResponse:
-        sources = request.app.state.service.store.list_sources()
-        return SourceListResponse(count=len(sources), sources=sources)
+    def list_sources(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> SourceListResponse:
+        store = request.app.state.service.store
+        sources = store.list_sources(limit=limit, offset=offset)
+        return SourceListResponse(
+            count=len(sources), total=store.source_count(), limit=limit, offset=offset, sources=sources
+        )
+
+    @app.post("/metrics/web-vitals", status_code=202, include_in_schema=False)
+    def receive_web_vitals(event: WebVitalEvent) -> dict[str, str]:
+        LOGGER.info(
+            "web_vital name=%s value=%s rating=%s navigation=%s event_id=%s",
+            event.name,
+            event.value,
+            event.rating,
+            event.navigationType,
+            event.id,
+        )
+        return {"status": "accepted"}
 
     @app.post("/query", response_model=QueryResponse, tags=["rag"])
     def query(payload: QueryRequest, request: Request) -> QueryResponse:
